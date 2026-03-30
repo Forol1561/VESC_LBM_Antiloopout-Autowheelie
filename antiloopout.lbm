@@ -1,0 +1,85 @@
+; ============================================================================
+; Anti-loopout — direct brake current via set-brake
+; Uses app-disable-output with a timeout longer than the tick,
+; so the app stays suppressed between yields without pulsating.
+; ============================================================================
+
+; ----------------------
+; Tunable parameters
+; ----------------------
+(def #max-pitch 35.0)
+(def #hysteresis 2.0)
+(def #activation-ms 50)
+
+(def #brake-max-a 30.0)
+(def #brake-min-a 2.0)
+(def #brake-scale 3.0)
+(def #log 0)
+
+; ----------------------
+; Internal state
+; ----------------------
+(def #active 0)
+(def #over-time-ms 0)
+(def #tick-us 10000)       ; 10ms tick
+(def #disable-ms 50)       ; suppress app for 50ms — longer than tick, no pulsing
+
+; ----------------------
+; Helpers
+; ----------------------
+(defun clamp (v low high) {
+    (if (> v high) high (if (< v low) low v))
+})
+
+(defun get-tilt-deg () {
+    (let ((r (trap (get-imu-rpy))))
+        (if (eq (ix r 0) 'exit-ok)
+            (rad2deg (ix (ix r 1) 0))
+            0.0))
+})
+
+; ----------------------
+; Main control step
+; ----------------------
+(defun step-antiloopout () {
+    (def pitch (get-tilt-deg))
+    (def threshold (if (= #active 1) (- #max-pitch #hysteresis) #max-pitch))
+
+    (if (> pitch threshold)
+        (def #over-time-ms (+ #over-time-ms (/ #tick-us 1000)))
+        (def #over-time-ms 0))
+
+    (if (and (= #active 0) (>= #over-time-ms #activation-ms))
+        (def #active 1) nil)
+    (if (and (= #active 1) (< pitch (- #max-pitch #hysteresis)))
+        (def #active 0) nil)
+
+    (if (= #active 1)
+        {
+            ; Suppress app for 50ms — refreshed every 10ms tick, no gap
+            (app-disable-output #disable-ms)
+            (def deg_over (let ((d (- pitch #max-pitch))) (if (> d 0.0) d 0.0)))
+            (def amps (clamp (* deg_over #brake-scale) #brake-min-a #brake-max-a))
+            (set-brake amps)
+            (if (= #log 1) (print (list "ANTI" "ACTIVE" "pitch" pitch "brake-a" amps)) nil)
+        }
+        {
+            ; Re-enable app immediately (pass 0 to cancel suppression)
+            (app-disable-output 0)
+            (if (= #log 1) (print (list "ANTI" "INACTIVE" "pitch" pitch)) nil)
+        })
+})
+
+; ----------------------
+; Main loop
+; ----------------------
+(defun main-loop ()
+    (loopwhile t {
+        (step-antiloopout)
+        (yield #tick-us)
+    })
+)
+
+(spawn main-loop)
+
+(if (= #log 1) (print (list "Anti-loopout loaded. Threshold:" #max-pitch "deg")))
